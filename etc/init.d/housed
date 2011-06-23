@@ -1,0 +1,67 @@
+#!/bin/bash
+#
+# housed	This shell script takes care of starting and stopping
+#		the housekeeping daemon (housed).
+#
+# chkconfig: 35 99 10
+# description: Housekeeper
+# processname: housed
+
+HOUSED_CONFIG=/etc/housed/housed.conf
+
+. $HOUSED_CONFIG
+
+
+function start() {
+	nohup $HOUSED_BIN > /dev/null &
+}
+
+function stop() {
+	echo "Kills process $(cat $HOUSED_PID) and $(cat $MCASTR_PID)"
+	kill $(cat $HOUSED_PID)
+	kill $(cat $MCASTR_PID)
+}
+
+function restart() {
+	stop
+	sleep 2
+	start
+}
+
+function status() {
+	if [ -f $HOUSED_PID ]; then
+		ps -e | awk '{print $1}' | grep $(cat $HOUSED_PID) > /dev/null
+		if [ $? == 0 ]; then
+			echo "Daemon running"
+			exit 0
+		else
+			echo "No process found at pid $(cat $HOUSED_PID)."
+			echo "use '$0 zap' to remove the pid file."
+		fi
+	else
+		echo "No daemon running"
+		if [ -f $MCASTR_LOCK ]; then
+			echo "warning: unclean stop of housed, mcastr lock file still exists."
+		fi
+	fi
+}
+
+function zap() {
+	rm $HOUSED_PID
+}
+
+case "$1" in
+	start)	start	;;
+	stop)	stop	;;
+	status)	status	;;
+	zap)	zap	;;
+	restart)
+		stop
+		start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|status|restart}"
+		exit 1
+esac
+
+exit $?

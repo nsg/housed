@@ -1,0 +1,335 @@
+#!/bin/bash
+
+# Copyright (C) 2011 by Stefan Berggren <nsg@nsg.cc>
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+CONFIG="/etc/housed/housed.conf"
+
+##
+# Functions
+##
+
+# Logs data to file or stdout
+function log() {
+	if [[ $LOGDIR = "STDOUT" ]]; then
+		echo -e "[$(date +%H%M%S)] $1"
+	else
+		if [ -d $LOGDIR ]; then
+			echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] [$(hostname -s)] $1" >> $LOGDIR/housed.log
+			mkdir -p "$LOGDIR/$(hostname -s)"
+			echo -e "[$(date +"%Y-%m-%d %H:%M:%S")] $1" >> "$LOGDIR/$(hostname -s)/housed_$(date +"%Y-%m-%d").log"
+		else
+			echo "Error: $LOGDIR is not a directory" 2>&1
+		fi
+	fi
+}
+
+# Logs data to kill log
+function killog() {
+	if [[ $LOGDIR = "STDOUT" ]]; then
+		log "$1\n$2"
+	else
+		if [ -d $LOGDIR ]; then
+			echo -e "#####\n### [$(date +"%Y-%m-%d %H:%M:%S")] [$(hostname -s)]\n#####\n$1\n$2" >> $LOGDIR/housed.kill.log
+			mkdir -p "$LOGDIR/$(hostname -s)"
+			echo -e "#####\n### [$(date +"%Y-%m-%d %H:%M:%S")]\n#####\n$1\n$2" >> "$LOGDIR/$(hostname -s)/housed.kill_$(date +"%Y-%m-%d").log"
+		else
+			echo "Error: $LOGDIR is not a directory" 2>&1
+		fi
+	fi
+}
+
+# Load configuration
+. $CONFIG
+. $QU_VAR/$QU_SYSTEM.conf
+
+function signal() {
+	SIGNAL="$(cat $MCASTR_DATA)"
+	SIGNAL_PARM1="$(echo $SIGNAL | awk '{print $2}')"
+	SIGNAL_COMMAND="$(echo $SIGNAL | awk '{print $3}')"
+	SIGNAL_EXTRA="$(echo $SIGNAL | awk '{print $4}')"
+
+	echo $SIGNAL_PARM1 | egrep "^[0-9-]*\$" > /dev/null
+	if [[ $? = 0 ]]; then
+		SIGNAL_JOBID=$SIGNAL_PARM1
+		SIGNAL_HOSTNAME=
+	else
+		SIGNAL_JOBID=-2
+		SIGNAL_HOSTNAME=$SIGNAL_PARM1
+	fi
+
+	if [ $SIGNAL_JOBID -gt 0 ]; then
+		qu_job_running_on $SIGNAL_JOBID $(hostname -s)
+		if [ $? = 1 ]; then
+			# log "No job $SIGNAL_JOBID on $(hostname -s)"
+			return;
+		fi
+	fi
+
+	if [ "x$SIGNAL_HOSTNAME" != "x" ] && [ $SIGNAL_JOBID != -1 ]; then
+		echo $SIGNAL_HOSTNAME | grep $(hostname -s) > /dev/null
+		if [ $? = 1 ]; then
+			# log "This is not host $SIGNAL_HOSTNAME"
+			return;
+		fi
+	fi
+
+	case $SIGNAL_COMMAND in
+		housekeepoff )
+			if [[ $SIGNAL_EXTRA ]]; then
+				HOUSEKEEP_OFF="$(expr $HOUSEKEEP_NOW + $SIGNAL_EXTRA \* 60)"
+				log "Housekeeper at $(hostname -s) will be disabled for $SIGNAL_EXTRA minutes"
+			else
+				log "Warning: invalid housekeepoff string, missing timespan"
+			fi
+			;;
+		shutdown )
+			log "Shuting down housekeeper"
+			close_app
+			;;
+		ping )
+			log "pong"
+			;;
+		state )
+			log "The system has been in state $STATE since $STATE_TIME"
+			;;
+    		* ) 
+			log "Error, unkown command ($SIGNAL_COMMAND)"
+			;;
+	esac
+
+}
+
+function close_app() {
+	log "Clean up, kill mcastr"
+	kill $(cat $MCASTR_PID)
+	rm $HOUSED_PID
+	exit 0
+}
+
+# Check status and set STATE
+function state_0() {
+
+	# Ask the queue system
+	qu_running_on $(hostname -s)
+	BJOBS_STATUS=$?
+
+	# Check the system for running processes
+	SYSTEM_USERS="$(awk -F : '{if(NR==1){printf("%s",$1)}else{printf("|%s",$1)}}' \
+		/etc/passwd | sort -u)"
+	PROCESSES="$(ps aux | awk '{if($1!="USER"){print $1}}' | \
+		sort -u | egrep -v $SYSTEM_USERS | egrep -v $PROCESS_WHITELIST)"
+
+	# Running jobs in queue system
+	if [ $BJOBS_STATUS = 0 ]; then
+		STATE=1 # Idle state
+
+	# No running jobs OR HOUSEKEEP is set to 2
+	elif [ $BJOBS_STATUS = 1 ] && [ -z "$PROCESSES" ] || [ "$HOUSEKEEP" = "$HOUSEKEEP_CYCLES" ]; then
+		STATE=2 # Housekeeping
+
+	# Running jobs on system, but no jobs in queue system
+	elif [ $BJOBS_STATUS = 1 ] && [ -n "$PROCESSES" ]; then
+		STATE=3 # Handle 50/50 case
+
+	# Running jobs on queue system, but no jobs in system
+	elif [ $BJOBS_STATUS = 0 ] && [ -z "$PROCESSES" ]; then
+		log "Warning: LSF reports usage but housed can't find any processes"
+		log "$(ps aux)"
+
+	else
+		log "Warning: LSF($BJOBS_STATUS) PROC($PROCESSES)"
+	fi
+
+	
+	HOUSEKEEP_NOW="$(date +%s)"
+	if [ $HOUSEKEEP_NOW -gt $HOUSEKEEP_OFF ] && [ $HOUSEKEEP_OFF -ne 0 ]; then
+		HOUSEKEEP_OFF=0
+		log "Housekeeper at $(hostname -s) is online"
+	fi
+
+}
+
+# Jobs running on node, normal state
+function state_1() {
+	STATE=0
+	HOUSEKEEP=0
+}
+
+# Housekeeping
+function state_2() {
+
+	if [ $HOUSEKEEP_OFF -eq 0 ]; then
+		housekeeping
+	else
+		# log "Housekeeping prevented"
+		sleep 1
+	fi
+
+	STATE=0
+	HOUSEKEEP=0
+}
+
+# The process list and queue system information differs
+function state_3() {
+	HOUSEKEEP="$(expr $HOUSEKEEP + 1)"
+	STATE=0
+}
+
+function housekeeping() {
+	for user in $PROCESSES; do
+		log "Killing processes for user $user"
+
+		# Run a simulation and save data to killog
+		killog "ipcs -s | grep $user:" "$(ipcs -s | grep $user)"
+		killog "ipcs -m | grep $user:" "$(ipcs -m | grep $user)"
+		killog "top -b -n 1:" "$(top -b -n 1)"
+		killog "ps aux:" "$(ps aux)"
+		killog "df:" "$(df)"
+		killog "free:" "$(free)"
+		qu_killog
+
+		# Create housekeeping script
+		tmpscript="$(mktemp)"
+		log "Create script $tmpscript"
+		cat << BLOCK > $tmpscript
+#!/bin/sh
+for semaphore in \$(ipcs -s | grep \${USER} | tail -n +4 | awk '{print \$2}'); do
+	if [ \$semaphore ]; then
+		ipcrm -s \$semaphore
+	fi
+done
+for shm in \$(ipcs -m | grep \${USER} | tail -n +4 | awk '{print \$2}'); do
+	if [ \$shm ]; then
+		ipcrm -m \$shm
+	fi
+done
+rm -f \$0
+kill -9 -1
+BLOCK
+		chmod -f 755 $tmpscript   > /dev/null 2>&1
+		if [ $? != 0 ]; then
+			log "error: failed to chmod $tmpscript"
+			exit 1
+		fi
+
+		chown -f $user $tmpscript > /dev/null 2>&1
+		if [ $? != 0 ]; then
+			log "error: failed to chown $tmpscript to $user"
+			exit 1
+		fi
+
+		log "Execute $tmpscript as user $user"
+		log "See kill.log for output and debug"
+		killog "Output:" "$(su $user -c $tmpscript 2>&1)"
+	done
+}
+
+##
+# Main program
+##
+
+log "housed started"
+
+# Register traps
+trap signal USR1
+trap close_app SIGINT
+
+# Enviroment
+MY_PROCESS_ID=$$
+RUN=1
+SIGNAL=
+STATE=0
+HOUSEKEEP=0
+HOUSEKEEP_OFF=0
+
+STATE_NAME=(choose compute housekeep conflict)
+
+# Killing old daamons
+for hd in $(ps aux | egrep mcastr\$ | awk '{print $2}'); do
+	if [[ $hd != $$ ]] && [ -f /proc/$hd/cmdline ]; then
+		log "Killing old mcastr pid $hd [$(cat /proc/$hd/cmdline)]"
+		kill $hd
+	fi
+done
+sleep 1 # give mcastr time to clean up
+for hd in $(ps aux | egrep housed\$ | awk '{print $2}'); do
+	if [[ $hd != $$ ]] && [ -f /proc/$hd/cmdline ]; then
+		log "Killing old housed pid $hd [$(cat /proc/$hd/cmdline)]"
+		kill $hd
+	fi
+done
+
+# Remove mcastr lock file
+rm $MCASTR_LOCK
+
+# Save my pid
+echo $MY_PROCESS_ID > $HOUSED_PID
+
+if [ ! -f $MCASTR_LOCK ]; then
+	(
+		S_RUN=0
+		while [ $S_RUN = 0 ]; do
+			#log "New mcastr process"
+			touch $MCASTR_LOCK
+			S_IN="$($MCASTR)"
+			S_RUN=$?
+			S_CLUSTER=$(echo $S_IN | awk '{print $1}')
+
+			if [ "x$S_CLUSTER" == "x$MY_CLUSTER" ]; then
+				#log "RSRV message: $S_IN"
+				echo $S_IN > $MCASTR_DATA
+				kill -s USR1 $MY_PROCESS_ID
+			else
+				if [ ! $S_CLUSTER ]; then
+					log "mcastr end"
+				else
+					log "Discard message intended for cluster $S_CLUSTER"
+				fi
+			fi
+
+			rm $MCASTR_LOCK
+		done
+	) &
+else
+	log "error: mcastr process already running"
+	exit 1
+fi
+
+OLD_STATE=$STATE
+while [ $RUN ]; do
+
+	# Print state changes, but ignore state 0
+	if [ "$STATE" != $OLD_STATE ] && [ "$STATE" != 0 ]; then
+		log "Enter state ${STATE_NAME[$STATE]} ($STATE) (from state ${STATE_NAME[$OLD_STATE]} ($OLD_STATE))"
+		STATE_TIME="$(date)"
+		OLD_STATE=$STATE
+	fi
+
+	case $STATE in
+		0 ) state_0 ;;
+		1 ) state_1 ;;
+		2 ) state_2 ;;
+		3 ) state_3 ;;
+    		* ) log "Error, unkown state ${STATE_NAME[$STATE]} ($STATE)" ;;
+	esac
+
+	sleep $TICK_TIME
+done
