@@ -24,7 +24,7 @@
 # NOTE: Run this as a non-priviliged user (not root).
 
 VERSION=1
-RELEASE=4
+RELEASE=5
 
 echo "Do not run this just yet, you most likely need to adapt this to your needs."
 exit 1
@@ -57,9 +57,11 @@ if [ -e ~/rpmbuild ]; then
 	read
 fi
 mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS,tmp}
-echo "%packager $(finger $USER | grep Name | awk -F ": " '{print $NF}'), $USER" > ~/.rpmmacros
+echo "%packager $(finger $USER | grep Name | awk -F ": " '{print $NF}'), <$USER@example.com>" > ~/.rpmmacros
 echo "%_topdir $HOME/rpmbuild" >> ~/.rpmmacros
 echo "%_tmppath $HOME/rpmbuild/tmp" >> ~/.rpmmacros
+echo "%_signature     gpg" >> ~/.rpmmacros
+echo "%_gpg_name      replace_with_name" >> ~/.rpmmacros
 
 mess "Copy files"
 cd /opt/lsf/utils/housekeeping/
@@ -85,7 +87,7 @@ Version: $VERSION
 Release: $RELEASE
 Source0: housed.tar
 License: MIT
-Group: nsg
+Group: Applications/System
 BuildArch: noarch
 BuildRoot: %{_tmppath}/%{name}-buildroot
 %description
