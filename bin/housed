@@ -84,7 +84,7 @@ function signal() {
 	fi
 
 	if [ "x$SIGNAL_HOSTNAME" != "x" ] && [ $SIGNAL_JOBID != -1 ]; then
-		echo $SIGNAL_HOSTNAME | grep $(hostname -s) > /dev/null
+		echo $SIGNAL_HOSTNAME | grep -w $(hostname -s) > /dev/null
 		if [ $? = 1 ]; then
 			# log "This is not host $SIGNAL_HOSTNAME"
 			return;
